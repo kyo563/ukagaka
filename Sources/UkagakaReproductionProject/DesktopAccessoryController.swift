@@ -6,6 +6,7 @@ struct CompanionWindowActions {
     let hide: () -> Void
     let restart: () -> Void
     let quit: () -> Void
+    let uninstall: () -> Void
 }
 
 @MainActor
@@ -29,8 +30,10 @@ final class DesktopAccessoryController {
         panel.backgroundColor = .clear
         panel.hasShadow = false
         panel.level = .floating
+        panel.sharingType = .readOnly
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.isMovableByWindowBackground = true
+        panel.setFrameAutosaveName("DesktopAccessoryPanelFrame")
         panel.contentView = NSHostingView(rootView: CharacterStageView(state: state, actions: actions))
     }
 

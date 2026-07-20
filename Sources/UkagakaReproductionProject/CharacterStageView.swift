@@ -2,7 +2,14 @@ import SwiftUI
 
 struct CharacterStageView: View {
     @ObservedObject var state: CompanionAppState
+    @ObservedObject private var settings: CompanionSettings
     let actions: CompanionWindowActions
+
+    init(state: CompanionAppState, actions: CompanionWindowActions) {
+        self.state = state
+        self.settings = state.settings
+        self.actions = actions
+    }
 
     var body: some View {
         VStack(spacing: 12) {
@@ -23,13 +30,15 @@ struct CharacterStageView: View {
         .padding(18)
         .frame(width: 700, height: 480)
         .background(Color.clear)
-        .opacity(state.settings.stageOpacity)
+        .opacity(settings.stageOpacity)
         .contextMenu {
             Button("設定") { actions.openSettings() }
             Button("隠す") { actions.hide() }
             Divider()
             Button("再起動") { actions.restart() }
             Button("終了") { actions.quit() }
+            Divider()
+            Button("アンインストール...") { actions.uninstall() }
         }
     }
 }

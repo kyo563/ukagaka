@@ -5,7 +5,8 @@ import Foundation
 @MainActor
 final class CompanionSettings: ObservableObject {
     private enum Keys {
-        static let apiKey = "settings.openai.apiKey"
+        static let legacyAPIKey = "settings.openai.apiKey"
+        static let keychainAPIKey = "openai-api-key"
         static let model = "settings.openai.model"
         static let characterAName = "settings.characterA.name"
         static let characterBName = "settings.characterB.name"
@@ -16,70 +17,83 @@ final class CompanionSettings: ObservableObject {
         static let idleBanterInterval = "settings.idleBanter.interval"
         static let launchAtLogin = "settings.lifecycle.launchAtLogin"
         static let didCompleteInitialSetup = "settings.initialSetup.completed"
+
+        static let persisted = [
+            legacyAPIKey,
+            model,
+            characterAName,
+            characterBName,
+            characterAPrompt,
+            characterBPrompt,
+            characterAssetRootPath,
+            stageOpacity,
+            idleBanterInterval,
+            launchAtLogin,
+            didCompleteInitialSetup
+        ]
     }
 
     private let defaults: UserDefaults
+    private let credentialStore: CredentialStoring
+    private let bundleIdentifier: String
+    private var isRestoring = false
 
     @Published var apiKey = "" {
-        didSet { defaults.set(apiKey, forKey: Keys.apiKey) }
+        didSet {
+            guard !isRestoring else { return }
+            persistAPIKey()
+        }
     }
-    @Published var model = "gpt-5" {
-        didSet { defaults.set(model, forKey: Keys.model) }
+    @Published var model = AppDefaults.openAIModel {
+        didSet { persist(model, key: Keys.model) }
     }
     @Published var characterAName = "キャラクターA" {
-        didSet { defaults.set(characterAName, forKey: Keys.characterAName) }
+        didSet { persist(characterAName, key: Keys.characterAName) }
     }
     @Published var characterBName = "キャラクターB" {
-        didSet { defaults.set(characterBName, forKey: Keys.characterBName) }
+        didSet { persist(characterBName, key: Keys.characterBName) }
     }
     @Published var characterAPrompt = CharacterPromptDefaults.characterA {
-        didSet { defaults.set(characterAPrompt, forKey: Keys.characterAPrompt) }
+        didSet { persist(characterAPrompt, key: Keys.characterAPrompt) }
     }
     @Published var characterBPrompt = CharacterPromptDefaults.characterB {
-        didSet { defaults.set(characterBPrompt, forKey: Keys.characterBPrompt) }
+        didSet { persist(characterBPrompt, key: Keys.characterBPrompt) }
     }
     @Published var characterAssetRootPath = "" {
-        didSet { defaults.set(characterAssetRootPath, forKey: Keys.characterAssetRootPath) }
+        didSet { persist(characterAssetRootPath, key: Keys.characterAssetRootPath) }
     }
-    @Published var stageOpacity = 1.0 {
-        didSet { defaults.set(stageOpacity, forKey: Keys.stageOpacity) }
+    @Published var stageOpacity = AppDefaults.stageOpacity {
+        didSet { persist(stageOpacity, key: Keys.stageOpacity) }
     }
-    @Published var idleBanterInterval = 90.0 {
-        didSet { defaults.set(idleBanterInterval, forKey: Keys.idleBanterInterval) }
+    @Published var idleBanterInterval = AppDefaults.idleBanterInterval {
+        didSet { persist(idleBanterInterval, key: Keys.idleBanterInterval) }
     }
     @Published var launchAtLogin = false {
         didSet {
+            guard !isRestoring else { return }
             defaults.set(launchAtLogin, forKey: Keys.launchAtLogin)
             launchAtLoginStatusMessage = LaunchAtLoginService.apply(enabled: launchAtLogin)
         }
     }
     @Published var didCompleteInitialSetup = false {
-        didSet { defaults.set(didCompleteInitialSetup, forKey: Keys.didCompleteInitialSetup) }
+        didSet { persist(didCompleteInitialSetup, key: Keys.didCompleteInitialSetup) }
     }
     @Published private(set) var launchAtLoginStatusMessage = LaunchAtLoginService.statusMessage
+    @Published private(set) var credentialStatusMessage = "APIキーはmacOS Keychainに保存されます。"
 
     var isChatGPTEnabled: Bool {
         apiKey.trimmedNonEmpty != nil
     }
 
-    init(defaults: UserDefaults = .standard) {
+    init(
+        defaults: UserDefaults = .standard,
+        credentialStore: CredentialStoring = KeychainCredentialStore(),
+        bundleIdentifier: String = Bundle.main.bundleIdentifier ?? AppDefaults.bundleIdentifier
+    ) {
         self.defaults = defaults
-        apiKey = defaults.string(forKey: Keys.apiKey) ?? ""
-        model = defaults.string(forKey: Keys.model) ?? "gpt-5"
-        characterAName = defaults.string(forKey: Keys.characterAName) ?? "キャラクターA"
-        characterBName = defaults.string(forKey: Keys.characterBName) ?? "キャラクターB"
-        characterAPrompt = defaults.string(forKey: Keys.characterAPrompt) ?? CharacterPromptDefaults.characterA
-        characterBPrompt = defaults.string(forKey: Keys.characterBPrompt) ?? CharacterPromptDefaults.characterB
-        characterAssetRootPath = defaults.string(forKey: Keys.characterAssetRootPath) ?? ""
-
-        let storedOpacity = defaults.double(forKey: Keys.stageOpacity)
-        stageOpacity = storedOpacity == 0 ? 1.0 : storedOpacity
-
-        let storedInterval = defaults.double(forKey: Keys.idleBanterInterval)
-        idleBanterInterval = storedInterval == 0 ? 90.0 : storedInterval
-
-        launchAtLogin = defaults.bool(forKey: Keys.launchAtLogin)
-        didCompleteInitialSetup = defaults.bool(forKey: Keys.didCompleteInitialSetup)
+        self.credentialStore = credentialStore
+        self.bundleIdentifier = bundleIdentifier
+        loadFromStorage(migrateLegacyAPIKey: true)
     }
 
     func completeInitialSetup() {
@@ -88,32 +102,17 @@ final class CompanionSettings: ObservableObject {
     }
 
     func restoreForLaunch() {
-        reload()
-        launchAtLoginStatusMessage = LaunchAtLoginService.apply(enabled: launchAtLogin)
+        loadFromStorage(migrateLegacyAPIKey: true)
+        launchAtLoginStatusMessage = LaunchAtLoginService.reconcile(preferredEnabled: launchAtLogin)
     }
 
     func reload() {
-        apiKey = defaults.string(forKey: Keys.apiKey) ?? ""
-        model = defaults.string(forKey: Keys.model) ?? "gpt-5"
-        characterAName = defaults.string(forKey: Keys.characterAName) ?? "キャラクターA"
-        characterBName = defaults.string(forKey: Keys.characterBName) ?? "キャラクターB"
-        characterAPrompt = defaults.string(forKey: Keys.characterAPrompt) ?? CharacterPromptDefaults.characterA
-        characterBPrompt = defaults.string(forKey: Keys.characterBPrompt) ?? CharacterPromptDefaults.characterB
-        characterAssetRootPath = defaults.string(forKey: Keys.characterAssetRootPath) ?? ""
-
-        let storedOpacity = defaults.double(forKey: Keys.stageOpacity)
-        stageOpacity = storedOpacity == 0 ? 1.0 : storedOpacity
-
-        let storedInterval = defaults.double(forKey: Keys.idleBanterInterval)
-        idleBanterInterval = storedInterval == 0 ? 90.0 : storedInterval
-
-        launchAtLogin = defaults.bool(forKey: Keys.launchAtLogin)
-        didCompleteInitialSetup = defaults.bool(forKey: Keys.didCompleteInitialSetup)
+        loadFromStorage(migrateLegacyAPIKey: true)
         launchAtLoginStatusMessage = LaunchAtLoginService.statusMessage
     }
 
     func save() {
-        defaults.set(apiKey, forKey: Keys.apiKey)
+        persistAPIKey()
         defaults.set(model, forKey: Keys.model)
         defaults.set(characterAName, forKey: Keys.characterAName)
         defaults.set(characterBName, forKey: Keys.characterBName)
@@ -124,11 +123,16 @@ final class CompanionSettings: ObservableObject {
         defaults.set(idleBanterInterval, forKey: Keys.idleBanterInterval)
         defaults.set(launchAtLogin, forKey: Keys.launchAtLogin)
         defaults.set(didCompleteInitialSetup, forKey: Keys.didCompleteInitialSetup)
-        synchronize()
+        defaults.synchronize()
     }
 
-    func synchronize() {
+    func eraseAllStoredData() throws {
+        try LaunchAtLoginService.unregisterForRemoval()
+        try credentialStore.delete(key: Keys.keychainAPIKey)
+        Keys.persisted.forEach(defaults.removeObject(forKey:))
+        defaults.removePersistentDomain(forName: bundleIdentifier)
         defaults.synchronize()
+        try removeAppOwnedFiles()
     }
 
     func selectCharacterAssetRootPath() {
@@ -146,5 +150,104 @@ final class CompanionSettings: ObservableObject {
 
     func clearCharacterAssetRootPath() {
         characterAssetRootPath = ""
+    }
+
+    func openLoginItemsSettings() {
+        LaunchAtLoginService.openSystemSettings()
+    }
+
+    private func loadFromStorage(migrateLegacyAPIKey: Bool) {
+        isRestoring = true
+        defer { isRestoring = false }
+
+        let legacyAPIKey = defaults.string(forKey: Keys.legacyAPIKey)?.trimmedNonEmpty
+        do {
+            if let storedAPIKey = try credentialStore.read(key: Keys.keychainAPIKey) {
+                apiKey = storedAPIKey
+            } else if migrateLegacyAPIKey, let legacyAPIKey {
+                try credentialStore.write(legacyAPIKey, key: Keys.keychainAPIKey)
+                apiKey = legacyAPIKey
+                defaults.removeObject(forKey: Keys.legacyAPIKey)
+                credentialStatusMessage = "既存のAPIキーをmacOS Keychainへ移行しました。"
+            } else {
+                apiKey = ""
+            }
+        } catch {
+            apiKey = legacyAPIKey ?? ""
+            credentialStatusMessage = error.localizedDescription
+        }
+
+        model = defaults.string(forKey: Keys.model) ?? AppDefaults.openAIModel
+        characterAName = defaults.string(forKey: Keys.characterAName) ?? "キャラクターA"
+        characterBName = defaults.string(forKey: Keys.characterBName) ?? "キャラクターB"
+        characterAPrompt = defaults.string(forKey: Keys.characterAPrompt) ?? CharacterPromptDefaults.characterA
+        characterBPrompt = defaults.string(forKey: Keys.characterBPrompt) ?? CharacterPromptDefaults.characterB
+        characterAssetRootPath = defaults.string(forKey: Keys.characterAssetRootPath) ?? ""
+
+        stageOpacity = clamped(
+            storedDouble(forKey: Keys.stageOpacity, fallback: AppDefaults.stageOpacity),
+            lower: AppDefaults.minimumStageOpacity,
+            upper: 1.0
+        )
+        idleBanterInterval = clamped(
+            storedDouble(forKey: Keys.idleBanterInterval, fallback: AppDefaults.idleBanterInterval),
+            lower: AppDefaults.minimumIdleBanterInterval,
+            upper: AppDefaults.maximumIdleBanterInterval
+        )
+        launchAtLogin = defaults.bool(forKey: Keys.launchAtLogin)
+        didCompleteInitialSetup = defaults.bool(forKey: Keys.didCompleteInitialSetup)
+    }
+
+    private func persistAPIKey() {
+        do {
+            if let value = apiKey.trimmedNonEmpty {
+                try credentialStore.write(value, key: Keys.keychainAPIKey)
+                credentialStatusMessage = "APIキーはmacOS Keychainに保存されています。"
+            } else {
+                try credentialStore.delete(key: Keys.keychainAPIKey)
+                credentialStatusMessage = "APIキーは未設定です。"
+            }
+            defaults.removeObject(forKey: Keys.legacyAPIKey)
+        } catch {
+            credentialStatusMessage = error.localizedDescription
+        }
+    }
+
+    private func persist(_ value: Any, key: String) {
+        guard !isRestoring else { return }
+        defaults.set(value, forKey: key)
+    }
+
+    private func storedDouble(forKey key: String, fallback: Double) -> Double {
+        guard defaults.object(forKey: key) != nil else { return fallback }
+        let value = defaults.double(forKey: key)
+        return value.isFinite ? value : fallback
+    }
+
+    private func clamped(_ value: Double, lower: Double, upper: Double) -> Double {
+        min(max(value, lower), upper)
+    }
+
+    private func removeAppOwnedFiles() throws {
+        let fileManager = FileManager.default
+        var urls: [URL] = []
+
+        if let applicationSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            urls.append(applicationSupport.appendingPathComponent(bundleIdentifier, isDirectory: true))
+        }
+        if let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first {
+            urls.append(caches.appendingPathComponent(bundleIdentifier, isDirectory: true))
+        }
+        if let library = fileManager.urls(for: .libraryDirectory, in: .userDomainMask).first {
+            urls.append(
+                library
+                    .appendingPathComponent("Saved Application State", isDirectory: true)
+                    .appendingPathComponent("\(bundleIdentifier).savedState", isDirectory: true)
+            )
+        }
+
+        for url in urls where fileManager.fileExists(atPath: url.path) {
+            try fileManager.removeItem(at: url)
+        }
     }
 }

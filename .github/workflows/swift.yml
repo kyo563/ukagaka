@@ -1,4 +1,4 @@
-name: Swift
+name: Build and test
 
 on:
   push:
@@ -20,3 +20,24 @@ jobs:
 
       - name: Build
         run: swift build
+
+      - name: Test
+        run: swift test
+
+      - name: Build app bundle
+        env:
+          VERSION: 0.1.0
+        run: |
+          chmod +x Scripts/*.sh
+          Scripts/build-app.sh
+          Scripts/verify-app.sh
+          Scripts/create-dmg.sh
+
+      - name: Upload installable app
+        uses: actions/upload-artifact@v4
+        with:
+          name: ukagaka-macos-${{ github.sha }}
+          path: |
+            dist/*.zip
+            dist/*.dmg
+          if-no-files-found: error

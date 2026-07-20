@@ -19,6 +19,7 @@ final class CompanionAppState: ObservableObject {
     private var lastHourlyAnnouncement: Int?
     private var settingsObservers: Set<AnyCancellable> = []
     private var hasStarted = false
+    private var conversationTask: Task<Void, Never>?
 
     init(
         settings: CompanionSettings,
@@ -64,15 +65,17 @@ final class CompanionAppState: ObservableObject {
 
     func saveSettingsForTermination() {
         settings.save()
+        conversationTask?.cancel()
         idleTimer?.invalidate()
         hourlyTimer?.invalidate()
     }
 
     func submitDraft() {
+        guard !isThinking else { return }
         let input = draftText
         draftText = ""
 
-        Task {
+        conversationTask = Task {
             await handle(input)
         }
     }
@@ -141,6 +144,8 @@ final class CompanionAppState: ObservableObject {
                     text: text,
                     expression: expression
                 ))
+            case .showToday:
+                append(dayEventService.todayLines(characters: characters))
             case .passToConversation:
                 if case .chat(let userInput) = command {
                     await requestConversation(for: userInput)
@@ -156,6 +161,7 @@ final class CompanionAppState: ObservableObject {
     }
 
     private func requestConversation(for userInput: String) async {
+        guard !isThinking else { return }
         isThinking = true
         defer { isThinking = false }
 
@@ -179,16 +185,44 @@ final class CompanionAppState: ObservableObject {
         guard let apiKey = settings.apiKey.trimmedNonEmpty else {
             return LocalConversationService()
         }
-        return OpenAIResponsesService(apiKey: apiKey, model: settings.model.trimmedNonEmpty ?? "gpt-5")
+        return OpenAIResponsesService(
+            apiKey: apiKey,
+            model: settings.model.trimmedNonEmpty ?? AppDefaults.openAIModel
+        )
     }
 
     private func scheduleIdleBanter() {
         idleTimer?.invalidate()
-        idleTimer = Timer.scheduledTimer(withTimeInterval: settings.idleBanterInterval, repeats: true) { [weak self] _ in
+        let interval = min(
+            max(settings.idleBanterInterval, AppDefaults.minimumIdleBanterInterval),
+            AppDefaults.maximumIdleBanterInterval
+        )
+        idleTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, !self.isThinking else { return }
-                self.append(self.banterService.nextBanter(characters: self.characters))
+                await self.requestIdleBanter()
             }
+        }
+    }
+
+    private func requestIdleBanter() async {
+        guard settings.isChatGPTEnabled else {
+            append(banterService.nextBanter(characters: characters))
+            return
+        }
+
+        isThinking = true
+        defer { isThinking = false }
+
+        do {
+            let generated = try await conversationService().generateReply(
+                userInput: "ユーザーは操作していません。設定された性格を守り、2人だけで短い小噺を始めてください。",
+                recentLines: lines,
+                characters: characters
+            )
+            append(generated)
+        } catch {
+            append(banterService.nextBanter(characters: characters))
         }
     }
 

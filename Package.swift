@@ -17,8 +17,16 @@ let package = Package(
         .executableTarget(
             name: "UkagakaReproductionProject",
             resources: [
-                .process("Resources")
+                .copy("Resources/Characters")
+            ],
+            linkerSettings: [
+                .linkedFramework("Security"),
+                .linkedFramework("ServiceManagement")
             ]
+        ),
+        .testTarget(
+            name: "UkagakaReproductionProjectTests",
+            dependencies: ["UkagakaReproductionProject"]
         )
     ]
 )

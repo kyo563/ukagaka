@@ -36,7 +36,11 @@ struct OpenAIResponsesService: ConversationGenerating {
     private let model: String
     private let session: URLSession
 
-    init(apiKey: String, model: String = "gpt-5", session: URLSession = .shared) {
+    init(
+        apiKey: String,
+        model: String = AppDefaults.openAIModel,
+        session: URLSession = .shared
+    ) {
         self.apiKey = apiKey
         self.model = model
         self.session = session
@@ -53,32 +57,46 @@ struct OpenAIResponsesService: ConversationGenerating {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.timeoutInterval = 60
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: payload(
+        request.httpBody = try JSONSerialization.data(withJSONObject: makePayload(
             userInput: userInput,
             recentLines: recentLines,
             characters: characters
         ))
 
         let (data, response) = try await session.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200..<300).contains(httpResponse.statusCode) else {
-            throw OpenAIResponsesError.requestFailed(String(data: data, encoding: .utf8) ?? "")
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw OpenAIResponsesError.invalidResponse
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw OpenAIResponsesError.requestFailed(
+                statusCode: httpResponse.statusCode,
+                message: Self.extractErrorMessage(from: data)
+            )
         }
 
-        let text = try extractOutputText(from: data)
-        return parseLines(from: text, fallbackSpeakerID: characters.first?.id ?? "character_a")
+        let text = try Self.extractOutputText(from: data)
+        let lines = Self.parseLines(
+            from: text,
+            fallbackSpeakerID: characters.first?.id ?? "character_a",
+            allowedSpeakerIDs: Set(characters.map(\.id))
+        )
+        guard !lines.isEmpty else {
+            throw OpenAIResponsesError.invalidResponse
+        }
+        return lines
     }
 
-    private func payload(
+    func makePayload(
         userInput: String,
         recentLines: [CharacterLine],
         characters: [CompanionCharacter]
     ) -> [String: Any] {
         [
             "model": model,
-            "max_output_tokens": 500,
+            "max_output_tokens": 800,
             "input": [
                 [
                     "role": "developer",
@@ -93,6 +111,14 @@ struct OpenAIResponsesService: ConversationGenerating {
                     直近の会話:
                     \(recentLines.suffix(6).map { "\($0.speakerID): \($0.text)" }.joined(separator: "\n"))
                     """
+                ]
+            ],
+            "text": [
+                "format": [
+                    "type": "json_schema",
+                    "name": "character_dialogue",
+                    "strict": true,
+                    "schema": responseSchema(speakerIDs: characters.map(\.id))
                 ]
             ]
         ]
@@ -110,25 +136,55 @@ struct OpenAIResponsesService: ConversationGenerating {
 
         return """
         あなたはmacOSデスクトップ常駐アクセサリ「伺か再現プロジェクト」の会話エンジンです。
-        2名のキャラクターが短く自然に掛け合います。
+        2名のキャラクターが日本語で短く自然に掛け合います。ユーザーの操作を勝手に実行せず、会話だけを生成してください。
 
         \(profiles)
 
-        必ず次のJSON配列だけを返してください。
-        [{"speakerID":"character_a","text":"短いセリフ","expression":"happy","gesture":"wave"}]
-
+        linesには1件か2件の短いセリフを入れてください。
         expressionは neutral, happy, angry, sad, fun, sleep のいずれかです。
         gestureは default, wave, point, think, emphasize, sleep のいずれかです。
         """
     }
 
-    private func extractOutputText(from data: Data) throws -> String {
+    private func responseSchema(speakerIDs: [String]) -> [String: Any] {
+        [
+            "type": "object",
+            "properties": [
+                "lines": [
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 2,
+                    "items": [
+                        "type": "object",
+                        "properties": [
+                            "speakerID": ["type": "string", "enum": speakerIDs],
+                            "text": ["type": "string", "minLength": 1, "maxLength": 180],
+                            "expression": [
+                                "type": "string",
+                                "enum": CharacterExpression.allCases.map(\.rawValue)
+                            ],
+                            "gesture": [
+                                "type": "string",
+                                "enum": CharacterGesture.allCases.map(\.rawValue)
+                            ]
+                        ],
+                        "required": ["speakerID", "text", "expression", "gesture"],
+                        "additionalProperties": false
+                    ]
+                ]
+            ],
+            "required": ["lines"],
+            "additionalProperties": false
+        ]
+    }
+
+    static func extractOutputText(from data: Data) throws -> String {
         let object = try JSONSerialization.jsonObject(with: data)
         guard let dictionary = object as? [String: Any] else {
             throw OpenAIResponsesError.invalidResponse
         }
 
-        if let outputText = dictionary["output_text"] as? String {
+        if let outputText = dictionary["output_text"] as? String, !outputText.isEmpty {
             return outputText
         }
 
@@ -136,7 +192,8 @@ struct OpenAIResponsesService: ConversationGenerating {
             let text = output.flatMap { item -> [String] in
                 guard let content = item["content"] as? [[String: Any]] else { return [] }
                 return content.compactMap { contentItem in
-                    contentItem["text"] as? String
+                    guard contentItem["type"] as? String == "output_text" else { return nil }
+                    return contentItem["text"] as? String
                 }
             }.joined(separator: "\n")
 
@@ -148,27 +205,60 @@ struct OpenAIResponsesService: ConversationGenerating {
         throw OpenAIResponsesError.invalidResponse
     }
 
-    private func parseLines(from text: String, fallbackSpeakerID: String) -> [CharacterLine] {
-        guard let data = text.data(using: .utf8),
-              let decoded = try? JSONDecoder().decode([GeneratedLine].self, from: data) else {
+    static func parseLines(
+        from text: String,
+        fallbackSpeakerID: String,
+        allowedSpeakerIDs: Set<String>
+    ) -> [CharacterLine] {
+        let cleanedText = text
+            .replacingOccurrences(of: "```json", with: "")
+            .replacingOccurrences(of: "```", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let data = cleanedText.data(using: .utf8) else { return [] }
+        let decoder = JSONDecoder()
+        let generatedLines: [GeneratedLine]
+
+        if let response = try? decoder.decode(GeneratedResponse.self, from: data) {
+            generatedLines = response.lines
+        } else if let legacyLines = try? decoder.decode([GeneratedLine].self, from: data) {
+            generatedLines = legacyLines
+        } else {
             return [CharacterLine(
                 speakerID: fallbackSpeakerID,
-                text: text.trimmingCharacters(in: .whitespacesAndNewlines),
+                text: cleanedText,
                 expression: .neutral
             )]
         }
 
-        return decoded.map { line in
+        return generatedLines.prefix(2).compactMap { line in
+            let trimmedText = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedText.isEmpty else { return nil }
+
+            let speakerID = allowedSpeakerIDs.contains(line.speakerID) ? line.speakerID : fallbackSpeakerID
             let expression = line.expression.flatMap(CharacterExpression.init(rawValue:)) ?? .neutral
             let gesture = line.gesture.flatMap(CharacterGesture.init(rawValue:))
             return CharacterLine(
-                speakerID: line.speakerID,
-                text: line.text,
+                speakerID: speakerID,
+                text: trimmedText,
                 expression: expression,
                 gesture: gesture
             )
         }
     }
+
+    private static func extractErrorMessage(from data: Data) -> String {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let error = object["error"] as? [String: Any],
+              let message = error["message"] as? String else {
+            return "OpenAI APIからエラーが返されました。"
+        }
+        return message
+    }
+}
+
+private struct GeneratedResponse: Decodable {
+    let lines: [GeneratedLine]
 }
 
 private struct GeneratedLine: Decodable {
@@ -178,8 +268,19 @@ private struct GeneratedLine: Decodable {
     let gesture: String?
 }
 
-enum OpenAIResponsesError: Error {
+enum OpenAIResponsesError: LocalizedError {
     case invalidURL
     case invalidResponse
-    case requestFailed(String)
+    case requestFailed(statusCode: Int, message: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidURL:
+            return "OpenAI APIのURLを作成できませんでした。"
+        case .invalidResponse:
+            return "OpenAI APIの応答を読み取れませんでした。"
+        case .requestFailed(let statusCode, let message):
+            return "OpenAI APIエラー (\(statusCode)): \(message)"
+        }
+    }
 }

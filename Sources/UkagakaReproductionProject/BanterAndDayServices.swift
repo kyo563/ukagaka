@@ -52,6 +52,24 @@ struct DayEventService {
         return CharacterLine(speakerID: character.id, text: "\(timeText)になりました。ひと息入れるなら今です。", expression: .happy)
     }
 
+    func todayLines(on date: Date = Date(), characters: [CompanionCharacter]) -> [CharacterLine] {
+        guard characters.count >= 2 else { return [] }
+        let dateText = Self.dateFormatter.string(from: date)
+        let eventText = eventName(on: date) ?? "登録されている記念日がない日"
+        return [
+            CharacterLine(
+                speakerID: characters[0].id,
+                text: "今日は\(dateText)です。",
+                expression: .happy
+            ),
+            CharacterLine(
+                speakerID: characters[1].id,
+                text: "このアプリの記念日帳では「\(eventText)」です。",
+                expression: .neutral
+            )
+        ]
+    }
+
     private func eventName(on date: Date) -> String? {
         let key = Self.monthDayFormatter.string(from: date)
         return eventsByMonthDay[key]
