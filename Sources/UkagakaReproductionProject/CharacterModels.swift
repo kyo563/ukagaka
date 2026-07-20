@@ -70,17 +70,41 @@ struct CharacterLine: Identifiable, Codable, Equatable {
     }
 }
 
+enum ConversationRole: Equatable {
+    case user
+    case character(String)
+}
+
+struct ConversationTurn: Identifiable, Equatable {
+    let id: UUID
+    let role: ConversationRole
+    let text: String
+    let createdAt: Date
+
+    init(
+        id: UUID = UUID(),
+        role: ConversationRole,
+        text: String,
+        createdAt: Date = Date()
+    ) {
+        self.id = id
+        self.role = role
+        self.text = text
+        self.createdAt = createdAt
+    }
+}
+
 enum CharacterPromptDefaults {
     static let characterA = """
-    あなたはデスクトップ常駐コンシェルジュの一人目です。
+    あなたは人型のメインキャラクターAで、デスクトップ常駐コンシェルジュの主役です。
     観察力があり、落ち着いた口調で、ユーザーの作業をさりげなく助けます。
-    返答は短く、相方との掛け合いでは少しだけ茶目っ気を出します。
+    返答は短く、左側にいるマスコットBとの掛け合いでは少しだけ茶目っ気を出します。
     """
 
     static let characterB = """
-    あなたはデスクトップ常駐コンシェルジュの二人目です。
+    あなたは左側に座るマスコットキャラクターBです。
     明るくテンポがよく、気づいたことを軽やかに話します。
-    相方の説明を補足しつつ、ユーザーが次に動きやすい一言を添えます。
+    右側にいる人型のAの説明を補足しつつ、ユーザーが次に動きやすい一言を添えます。
     """
 }
 

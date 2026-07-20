@@ -39,6 +39,16 @@ final class OpenAIResponsesServiceTests: XCTestCase {
         XCTAssertEqual(lines[0].gesture, .wave)
     }
 
+    func testRejectsMalformedStructuredOutput() {
+        XCTAssertTrue(
+            OpenAIResponsesService.parseLines(
+                from: "not-json",
+                fallbackSpeakerID: "character_a",
+                allowedSpeakerIDs: ["character_a", "character_b"]
+            ).isEmpty
+        )
+    }
+
     @MainActor
     func testPayloadUsesStrictJSONSchema() {
         let settings = CompanionSettings(
@@ -48,7 +58,7 @@ final class OpenAIResponsesServiceTests: XCTestCase {
         let characters = CharacterProfiles.make(settings: settings)
         let payload = OpenAIResponsesService(apiKey: "test").makePayload(
             userInput: "こんにちは",
-            recentLines: [],
+            recentTurns: [],
             characters: characters
         )
 
@@ -56,7 +66,130 @@ final class OpenAIResponsesServiceTests: XCTestCase {
         let format = text?["format"] as? [String: Any]
         XCTAssertEqual(format?["type"] as? String, "json_schema")
         XCTAssertEqual(format?["strict"] as? Bool, true)
+        XCTAssertEqual(payload["store"] as? Bool, false)
     }
+
+    @MainActor
+    func testPayloadIncludesUserAndCharacterHistory() {
+        let settings = CompanionSettings(
+            defaults: UserDefaults(suiteName: UUID().uuidString)!,
+            credentialStore: MemoryCredentialStore()
+        )
+        let characters = CharacterProfiles.make(settings: settings)
+        let turns = [
+            ConversationTurn(role: .user, text: "前の条件です"),
+            ConversationTurn(role: .character("character_a"), text: "承知しました")
+        ]
+
+        let payload = OpenAIResponsesService(apiKey: "test").makePayload(
+            userInput: "続けてください",
+            recentTurns: turns,
+            characters: characters
+        )
+        let input = payload["input"] as? [[String: Any]]
+
+        XCTAssertEqual(input?.count, 4)
+        XCTAssertEqual(input?[1]["role"] as? String, "user")
+        XCTAssertEqual(input?[1]["content"] as? String, "前の条件です")
+        XCTAssertEqual(input?[2]["role"] as? String, "assistant")
+        XCTAssertEqual(input?[3]["content"] as? String, "続けてください")
+    }
+
+    func testFiltersModelListForConversationModels() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "data": [
+                ["id": "gpt-5-mini"],
+                ["id": "gpt-5-nano"],
+                ["id": "gpt-realtime"],
+                ["id": "text-embedding-3-small"]
+            ]
+        ])
+
+        XCTAssertEqual(
+            try OpenAIModelService.selectableModelIDs(from: data),
+            ["gpt-5-mini", "gpt-5-nano"]
+        )
+    }
+
+    func testClassifiesCommonAPIErrors() {
+        XCTAssertEqual(
+            OpenAIResponsesError.requestFailed(
+                statusCode: 401,
+                code: "invalid_api_key",
+                message: "bad key"
+            ).kind,
+            .invalidAPIKey
+        )
+        XCTAssertEqual(
+            OpenAIResponsesError.requestFailed(
+                statusCode: 404,
+                code: "model_not_found",
+                message: "missing"
+            ).kind,
+            .modelNotFound
+        )
+        XCTAssertEqual(
+            OpenAIResponsesError.requestFailed(
+                statusCode: 429,
+                code: "insufficient_quota",
+                message: "quota"
+            ).kind,
+            .quotaExceeded
+        )
+    }
+
+    func testConnectionRequestDisablesResponseStorage() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OpenAIURLProtocolStub.self]
+        let session = URLSession(configuration: configuration)
+        var requestBody: [String: Any] = [:]
+
+        OpenAIURLProtocolStub.handler = { request in
+            if let body = request.httpBody,
+               let object = try JSONSerialization.jsonObject(with: body) as? [String: Any] {
+                requestBody = object
+            }
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data("{}".utf8))
+        }
+        defer { OpenAIURLProtocolStub.handler = nil }
+
+        try await OpenAIModelService(apiKey: "test", session: session).testConnection(model: "gpt-5-mini")
+
+        XCTAssertEqual(requestBody["model"] as? String, "gpt-5-mini")
+        XCTAssertEqual(requestBody["store"] as? Bool, false)
+    }
+}
+
+private final class OpenAIURLProtocolStub: URLProtocol {
+    static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let handler = Self.handler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
 }
 
 final class MemoryCredentialStore: CredentialStoring {

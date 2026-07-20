@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-version="${VERSION:-0.1.1}"
+version="${VERSION:-0.2.0}"
 app_path="${1:-$repo_root/dist/伺か再現プロジェクト.app}"
 output_path="${2:-$repo_root/dist/Ukagaka-Reproduction-Project-macOS-$version.dmg}"
 

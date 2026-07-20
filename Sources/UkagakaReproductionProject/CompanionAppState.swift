@@ -1,12 +1,24 @@
 import Combine
 import Foundation
 
+enum OpenAIConnectionStatus: Equatable {
+    case idle
+    case checking(String)
+    case success(String)
+    case failure(String)
+}
+
 @MainActor
 final class CompanionAppState: ObservableObject {
     @Published private(set) var characters: [CompanionCharacter]
     @Published private(set) var lines: [CharacterLine] = []
+    @Published private(set) var conversationHistory: [ConversationTurn] = []
     @Published var draftText = ""
     @Published private(set) var isThinking = false
+    @Published private(set) var isBubbleVisible = true
+    @Published private(set) var availableModels: [String]
+    @Published private(set) var connectionStatus: OpenAIConnectionStatus = .idle
+    @Published private(set) var lastAPIError: String?
 
     let settings: CompanionSettings
 
@@ -14,9 +26,13 @@ final class CompanionAppState: ObservableObject {
     private let commandRouter: CommandRouter
     private let banterService: BanterService
     private let dayEventService: DayEventService
+    private let activityMonitor: SystemActivityMonitor
     private var idleTimer: Timer?
     private var hourlyTimer: Timer?
+    private var bubbleDismissTimer: Timer?
     private var lastHourlyAnnouncement: Int?
+    private var lastAutomaticAIRequestAt: Date?
+    private var validatedConnectionFingerprint: String?
     private var settingsObservers: Set<AnyCancellable> = []
     private var hasStarted = false
     private var conversationTask: Task<Void, Never>?
@@ -26,7 +42,8 @@ final class CompanionAppState: ObservableObject {
         commandParser: CommandParser,
         commandRouter: CommandRouter,
         banterService: BanterService,
-        dayEventService: DayEventService
+        dayEventService: DayEventService,
+        activityMonitor: SystemActivityMonitor
     ) {
         self.settings = settings
         self.characters = CharacterProfiles.make(settings: settings)
@@ -34,6 +51,8 @@ final class CompanionAppState: ObservableObject {
         self.commandRouter = commandRouter
         self.banterService = banterService
         self.dayEventService = dayEventService
+        self.activityMonitor = activityMonitor
+        self.availableModels = Self.initialModelList(settings.model)
         observeSettings()
     }
 
@@ -43,13 +62,15 @@ final class CompanionAppState: ObservableObject {
             commandParser: CommandParser(),
             commandRouter: CommandRouter(),
             banterService: BanterService(),
-            dayEventService: DayEventService()
+            dayEventService: DayEventService(),
+            activityMonitor: SystemActivityMonitor()
         )
     }
 
     func start() {
         guard !hasStarted else { return }
         hasStarted = true
+        lastAutomaticAIRequestAt = Date()
         append(dayEventService.openingLines(characters: characters))
         scheduleIdleBanter()
         scheduleHourlyAnnouncements()
@@ -57,9 +78,11 @@ final class CompanionAppState: ObservableObject {
 
     func restorePersistedSettings() {
         settings.restoreForLaunch()
-        reloadCharacters()
+        availableModels = Self.initialModelList(settings.model)
+        reloadCharacters(clearImageCache: true)
         if hasStarted {
             scheduleIdleBanter()
+            scheduleBubbleDismissal()
         }
     }
 
@@ -68,12 +91,14 @@ final class CompanionAppState: ObservableObject {
         conversationTask?.cancel()
         idleTimer?.invalidate()
         hourlyTimer?.invalidate()
+        bubbleDismissTimer?.invalidate()
     }
 
     func submitDraft() {
         guard !isThinking else { return }
         let input = draftText
         draftText = ""
+        showBubble()
 
         conversationTask = Task {
             await handle(input)
@@ -88,38 +113,126 @@ final class CompanionAppState: ObservableObject {
         lines.last(where: { $0.speakerID == character.id })?.gesture ?? .default
     }
 
-    func applySettingsChanges() {
-        settings.save()
-        reloadCharacters()
-        if hasStarted {
-            scheduleIdleBanter()
+    func showBubble() {
+        isBubbleVisible = true
+        scheduleBubbleDismissal()
+    }
+
+    func hideBubble() {
+        bubbleDismissTimer?.invalidate()
+        isBubbleVisible = false
+    }
+
+    func toggleClickThrough() {
+        settings.setClickThrough(!settings.clickThrough)
+    }
+
+    func refreshAvailableModels(apiKey: String) async {
+        guard let key = apiKey.trimmedNonEmpty else {
+            connectionStatus = .failure("APIキーを入力してください。")
+            return
+        }
+
+        connectionStatus = .checking("利用可能なモデルを取得しています...")
+        do {
+            let models = try await OpenAIModelService(apiKey: key).listModels()
+            guard !models.isEmpty else {
+                throw OpenAIResponsesError.invalidResponse
+            }
+            availableModels = models
+            connectionStatus = .success("\(models.count)件のモデルを取得しました。")
+        } catch {
+            setAPIError(error)
         }
     }
 
+    func testOpenAIConnection(apiKey: String, model: String) async -> Bool {
+        guard let key = apiKey.trimmedNonEmpty else {
+            connectionStatus = .failure("APIキーを入力してください。")
+            return false
+        }
+        guard let selectedModel = model.trimmedNonEmpty else {
+            connectionStatus = .failure("モデルを選択してください。")
+            return false
+        }
+
+        connectionStatus = .checking("モデルとAPI接続を確認しています...")
+        do {
+            let modelService = OpenAIModelService(apiKey: key)
+            let models = try await modelService.listModels()
+            availableModels = models
+            guard models.contains(selectedModel) else {
+                throw OpenAIResponsesError.requestFailed(
+                    statusCode: 404,
+                    code: "model_not_found",
+                    message: "選択したモデルはこのAPIキーで利用できません。"
+                )
+            }
+            settings.recordAPIRequest(automatic: false)
+            try await modelService.testConnection(model: selectedModel)
+            validatedConnectionFingerprint = Self.connectionFingerprint(apiKey: key, model: selectedModel)
+            lastAPIError = nil
+            connectionStatus = .success("接続に成功しました。モデル: \(selectedModel)")
+            return true
+        } catch {
+            setAPIError(error)
+            return false
+        }
+    }
+
+    func validateAndApplySettings(_ draft: CompanionSettingsDraft) async -> Bool {
+        if let key = draft.apiKey.trimmedNonEmpty {
+            guard let model = draft.model.trimmedNonEmpty else {
+                connectionStatus = .failure("モデルを選択してください。")
+                return false
+            }
+            let fingerprint = Self.connectionFingerprint(apiKey: key, model: model)
+            if validatedConnectionFingerprint != fingerprint {
+                guard await testOpenAIConnection(apiKey: key, model: model) else {
+                    return false
+                }
+            } else if !availableModels.contains(model) {
+                connectionStatus = .failure("選択したモデルは利用可能モデル一覧にありません。")
+                return false
+            }
+        } else {
+            connectionStatus = .idle
+            validatedConnectionFingerprint = nil
+        }
+
+        let assetPathChanged = settings.characterAssetRootPath != draft.characterAssetRootPath
+        settings.apply(draft)
+        reloadCharacters(clearImageCache: assetPathChanged)
+        scheduleIdleBanter()
+        scheduleBubbleDismissal()
+        if draft.apiKey.trimmedNonEmpty == nil {
+            connectionStatus = .success("ローカル応答モードで保存しました。")
+        } else {
+            connectionStatus = .success("設定を保存しました。")
+        }
+        return true
+    }
+
+    func completeInitialSetup(with draft: CompanionSettingsDraft) async -> Bool {
+        guard await validateAndApplySettings(draft) else { return false }
+        settings.completeInitialSetup()
+        return true
+    }
+
     private func observeSettings() {
-        settings.$characterAName
-            .dropFirst()
-            .sink { [weak self] _ in self?.reloadCharacters() }
-            .store(in: &settingsObservers)
-
-        settings.$characterBName
-            .dropFirst()
-            .sink { [weak self] _ in self?.reloadCharacters() }
-            .store(in: &settingsObservers)
-
-        settings.$characterAPrompt
-            .dropFirst()
-            .sink { [weak self] _ in self?.reloadCharacters() }
-            .store(in: &settingsObservers)
-
-        settings.$characterBPrompt
-            .dropFirst()
-            .sink { [weak self] _ in self?.reloadCharacters() }
-            .store(in: &settingsObservers)
+        Publishers.CombineLatest4(
+            settings.$characterAName,
+            settings.$characterBName,
+            settings.$characterAPrompt,
+            settings.$characterBPrompt
+        )
+        .dropFirst()
+        .sink { [weak self] _ in self?.reloadCharacters(clearImageCache: false) }
+        .store(in: &settingsObservers)
 
         settings.$characterAssetRootPath
             .dropFirst()
-            .sink { [weak self] _ in self?.reloadCharacters() }
+            .sink { [weak self] _ in self?.reloadCharacters(clearImageCache: true) }
             .store(in: &settingsObservers)
 
         settings.$idleBanterInterval
@@ -128,8 +241,12 @@ final class CompanionAppState: ObservableObject {
             .store(in: &settingsObservers)
     }
 
-    private func reloadCharacters() {
+    private func reloadCharacters(clearImageCache: Bool) {
+        if clearImageCache {
+            CharacterImageLoader.clearCache()
+        }
         characters = CharacterProfiles.make(settings: settings)
+        CharacterImageLoader.preload(characters: characters)
     }
 
     private func handle(_ input: String) async {
@@ -154,7 +271,7 @@ final class CompanionAppState: ObservableObject {
         } catch {
             append(CharacterLine(
                 speakerID: characters.first?.id ?? "character_a",
-                text: "うまく実行できませんでした。入力を少し変えて試してください。",
+                text: "操作を実行できませんでした: \(error.localizedDescription)",
                 expression: .sad
             ))
         }
@@ -165,17 +282,25 @@ final class CompanionAppState: ObservableObject {
         isThinking = true
         defer { isThinking = false }
 
+        conversationHistory.append(ConversationTurn(role: .user, text: userInput))
+        trimConversationHistory()
+
         do {
+            if settings.isChatGPTEnabled {
+                settings.recordAPIRequest(automatic: false)
+            }
             let generated = try await conversationService().generateReply(
                 userInput: userInput,
-                recentLines: lines,
+                recentTurns: conversationHistory,
                 characters: characters
             )
-            append(generated)
+            appendConversationLines(generated)
+            lastAPIError = nil
         } catch {
+            setAPIError(error)
             append(CharacterLine(
                 speakerID: characters.first?.id ?? "character_a",
-                text: "会話生成でつまずきました。APIキーやモデル名を設定画面で確認してください。",
+                text: OpenAIErrorPresenter.message(for: error),
                 expression: .sad
             ))
         }
@@ -193,6 +318,7 @@ final class CompanionAppState: ObservableObject {
 
     private func scheduleIdleBanter() {
         idleTimer?.invalidate()
+        guard hasStarted else { return }
         let interval = min(
             max(settings.idleBanterInterval, AppDefaults.minimumIdleBanterInterval),
             AppDefaults.maximumIdleBanterInterval
@@ -205,23 +331,34 @@ final class CompanionAppState: ObservableObject {
         }
     }
 
-    private func requestIdleBanter() async {
-        guard settings.isChatGPTEnabled else {
+    private func requestIdleBanter(date: Date = Date()) async {
+        guard activityMonitor.allowsAutomaticBanter() else { return }
+
+        let elapsed = lastAutomaticAIRequestAt.map { date.timeIntervalSince($0) } ?? .greatestFiniteMagnitude
+        let shouldUseAI = settings.isChatGPTEnabled
+            && settings.canUseAutomaticAI()
+            && elapsed >= settings.automaticAIBanterInterval
+
+        guard shouldUseAI else {
             append(banterService.nextBanter(characters: characters))
             return
         }
 
         isThinking = true
         defer { isThinking = false }
+        lastAutomaticAIRequestAt = date
+        settings.recordAPIRequest(automatic: true)
 
         do {
             let generated = try await conversationService().generateReply(
                 userInput: "ユーザーは操作していません。設定された性格を守り、2人だけで短い小噺を始めてください。",
-                recentLines: lines,
+                recentTurns: conversationHistory,
                 characters: characters
             )
-            append(generated)
+            appendConversationLines(generated)
+            lastAPIError = nil
         } catch {
+            setAPIError(error)
             append(banterService.nextBanter(characters: characters))
         }
     }
@@ -238,7 +375,8 @@ final class CompanionAppState: ObservableObject {
 
     private func announceHourIfNeeded(date: Date = Date()) {
         let components = Calendar.current.dateComponents([.hour, .minute], from: date)
-        guard components.minute == 0,
+        guard activityMonitor.allowsAutomaticBanter(),
+              components.minute == 0,
               let hour = components.hour,
               lastHourlyAnnouncement != hour,
               let character = characters.first else {
@@ -249,19 +387,67 @@ final class CompanionAppState: ObservableObject {
         append(dayEventService.hourlyLine(on: date, character: character))
     }
 
+    private func appendConversationLines(_ newLines: [CharacterLine]) {
+        append(newLines)
+        conversationHistory.append(contentsOf: newLines.map {
+            ConversationTurn(role: .character($0.speakerID), text: $0.text, createdAt: $0.createdAt)
+        })
+        trimConversationHistory()
+    }
+
     private func append(_ newLines: [CharacterLine]) {
         lines.append(contentsOf: newLines)
-        trimHistory()
+        trimDisplayHistory()
+        showBubble()
     }
 
     private func append(_ line: CharacterLine) {
         lines.append(line)
-        trimHistory()
+        trimDisplayHistory()
+        showBubble()
     }
 
-    private func trimHistory() {
+    private func scheduleBubbleDismissal() {
+        bubbleDismissTimer?.invalidate()
+        guard hasStarted, isBubbleVisible else { return }
+        bubbleDismissTimer = Timer.scheduledTimer(
+            withTimeInterval: settings.bubbleDisplayDuration,
+            repeats: false
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, !self.isThinking, self.draftText.isEmpty else { return }
+                self.isBubbleVisible = false
+            }
+        }
+    }
+
+    private func setAPIError(_ error: Error) {
+        let message = OpenAIErrorPresenter.message(for: error)
+        lastAPIError = message
+        connectionStatus = .failure(message)
+    }
+
+    private func trimDisplayHistory() {
         if lines.count > 12 {
             lines.removeFirst(lines.count - 12)
         }
+    }
+
+    private func trimConversationHistory() {
+        if conversationHistory.count > 24 {
+            conversationHistory.removeFirst(conversationHistory.count - 24)
+        }
+    }
+
+    private static func initialModelList(_ selectedModel: String) -> [String] {
+        var models = AppDefaults.selectableModels
+        if !models.contains(selectedModel) {
+            models.insert(selectedModel, at: 0)
+        }
+        return models
+    }
+
+    private static func connectionFingerprint(apiKey: String, model: String) -> String {
+        "\(apiKey.hashValue):\(model)"
     }
 }
