@@ -19,6 +19,8 @@ final class DesktopAccessoryController: NSObject, NSWindowDelegate {
     private var observers: Set<AnyCancellable> = []
     private var snapWorkItem: DispatchWorkItem?
     private var isUpdatingFrame = false
+    private var stableFrame = NSRect.zero
+    private var ignoreMoveNotificationsUntil = Date.distantPast
 
     init(state: CompanionAppState, actions: CompanionWindowActions) {
         self.state = state
@@ -47,6 +49,7 @@ final class DesktopAccessoryController: NSObject, NSWindowDelegate {
         panel.contentView = NSHostingView(rootView: CharacterStageView(state: state, actions: actions))
 
         restoreFrameForCurrentDisplay()
+        stableFrame = panel.frame
         applyWindowBehavior()
         observeState()
     }
@@ -62,7 +65,7 @@ final class DesktopAccessoryController: NSObject, NSWindowDelegate {
     }
 
     func windowDidMove(_ notification: Notification) {
-        guard !isUpdatingFrame else { return }
+        guard !isUpdatingFrame, Date() >= ignoreMoveNotificationsUntil else { return }
         snapWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             self?.snapToNearestEdge()
@@ -78,16 +81,22 @@ final class DesktopAccessoryController: NSObject, NSWindowDelegate {
     private func observeState() {
         state.$isBubbleVisible
             .dropFirst()
-            .sink { [weak self] _ in self?.updatePanelSize(animated: true) }
+            .sink { [weak self] _ in
+                DispatchQueue.main.async { self?.updatePanelSize(animated: true) }
+            }
             .store(in: &observers)
 
         Publishers.CombineLatest(settings.$characterAScale, settings.$characterBScale)
             .dropFirst()
-            .sink { [weak self] _ in self?.updatePanelSize(animated: true) }
+            .sink { [weak self] _ in
+                DispatchQueue.main.async { self?.updatePanelSize(animated: true) }
+            }
             .store(in: &observers)
 
         Publishers.CombineLatest(settings.$clickThrough, settings.$alwaysOnTop)
-            .sink { [weak self] _ in self?.applyWindowBehavior() }
+            .sink { [weak self] _ in
+                DispatchQueue.main.async { self?.applyWindowBehavior() }
+            }
             .store(in: &observers)
     }
 
@@ -97,22 +106,39 @@ final class DesktopAccessoryController: NSObject, NSWindowDelegate {
     }
 
     private func updatePanelSize(animated: Bool) {
+        snapWorkItem?.cancel()
+        snapWorkItem = nil
         let size = Self.panelSize(state: state, settings: settings)
-        guard panel.frame.size != size else { return }
+        let referenceFrame = stableFrame == .zero ? panel.frame : stableFrame
 
-        let oldFrame = panel.frame
         var newFrame = NSRect(
-            x: oldFrame.maxX - size.width,
-            y: oldFrame.minY,
+            x: referenceFrame.maxX - size.width,
+            y: referenceFrame.minY,
             width: size.width,
             height: size.height
         )
         if let screen = panel.screen ?? NSScreen.main {
             newFrame = constrained(newFrame, to: screen.visibleFrame)
         }
+        guard panel.frame != newFrame else { return }
 
+        ignoreMoveNotificationsUntil = Date().addingTimeInterval(animated ? 0.35 : 0.05)
         isUpdatingFrame = true
         panel.setFrame(newFrame, display: true, animate: animated)
+        isUpdatingFrame = false
+        stableFrame = newFrame
+        saveFrameForCurrentDisplay()
+
+        let delay = animated ? 0.25 : 0
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.enforceStableFrame(newFrame)
+        }
+    }
+
+    private func enforceStableFrame(_ expectedFrame: NSRect) {
+        guard stableFrame == expectedFrame, panel.frame != expectedFrame else { return }
+        isUpdatingFrame = true
+        panel.setFrame(expectedFrame, display: true, animate: false)
         isUpdatingFrame = false
         saveFrameForCurrentDisplay()
     }
@@ -135,9 +161,11 @@ final class DesktopAccessoryController: NSObject, NSWindowDelegate {
             frame.origin.y = visibleFrame.maxY - frame.height
         }
 
+        ignoreMoveNotificationsUntil = Date().addingTimeInterval(0.35)
         isUpdatingFrame = true
         panel.setFrame(frame, display: true, animate: true)
         isUpdatingFrame = false
+        stableFrame = frame
         saveFrameForCurrentDisplay()
     }
 
