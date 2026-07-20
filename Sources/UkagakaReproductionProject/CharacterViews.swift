@@ -5,18 +5,20 @@ struct CharacterView: View {
     let character: CompanionCharacter
     let expression: CharacterExpression
     let gesture: CharacterGesture
+    let scale: Double
+    let baseSize: CGSize
 
     var body: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 4) {
             if let sprite = CharacterImageLoader.sprite(for: character, expression: expression, gesture: gesture) {
                 LayeredSpriteView(sprite: sprite)
-                    .frame(maxWidth: 300, maxHeight: 290)
+                    .frame(width: baseSize.width * scale, height: baseSize.height * scale)
             } else {
                 PlaceholderCharacterView(character: character, expression: expression)
-                    .frame(width: 260, height: 290)
+                    .frame(width: baseSize.width * scale, height: baseSize.height * scale)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+        .frame(maxHeight: .infinity, alignment: .bottom)
     }
 }
 
@@ -46,23 +48,24 @@ private struct PlaceholderCharacterView: View {
         ZStack {
             Capsule()
                 .fill(character.accentColor.opacity(0.22))
-                .frame(width: 150, height: 230)
+                .frame(width: 90, height: 130)
                 .offset(y: 30)
 
             Circle()
                 .fill(character.accentColor.opacity(0.32))
-                .frame(width: 112, height: 112)
-                .offset(y: -78)
+                .frame(width: 72, height: 72)
+                .offset(y: -42)
 
             expressionFace
-                .offset(y: -78)
+                .scaleEffect(0.65)
+                .offset(y: -42)
 
             Text(character.displayName)
                 .font(.caption.weight(.semibold))
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(.regularMaterial, in: Capsule())
-                .offset(y: 118)
+                .offset(y: 72)
         }
         .shadow(color: character.accentColor.opacity(0.24), radius: 18, y: 8)
     }

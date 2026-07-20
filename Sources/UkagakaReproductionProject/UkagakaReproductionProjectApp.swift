@@ -16,6 +16,9 @@ struct UkagakaReproductionProjectApp: App {
             Button("設定...") {
                 appDelegate.showSettings()
             }
+            Button("クリック透過を切り替え") {
+                appDelegate.toggleClickThrough()
+            }
             Divider()
             Button("再起動") {
                 appDelegate.restartApplication()
@@ -47,6 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             actions: CompanionWindowActions(
                 openSettings: { [weak self] in self?.showSettings() },
                 hide: { [weak self] in self?.hideAccessory() },
+                toggleClickThrough: { [weak self] in self?.toggleClickThrough() },
                 restart: { [weak self] in self?.restartApplication() },
                 quit: { [weak self] in self?.quitApplication() },
                 uninstall: { [weak self] in self?.uninstallApplication() }
@@ -81,6 +85,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         accessoryController?.hide()
     }
 
+    func toggleClickThrough() {
+        appState.toggleClickThrough()
+    }
+
     func showSettings() {
         if let settingsController {
             settingsController.window?.makeKeyAndOrderFront(nil)
@@ -89,7 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 700),
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 820),
             styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
@@ -97,7 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = "伺か再現プロジェクト 設定"
         window.sharingType = .readOnly
         window.center()
-        window.minSize = NSSize(width: 560, height: 560)
+        window.minSize = NSSize(width: 620, height: 680)
         window.contentView = NSHostingView(
             rootView: SettingsRootView(
                 state: appState,
@@ -119,7 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 600),
+            contentRect: NSRect(x: 0, y: 0, width: 680, height: 720),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
