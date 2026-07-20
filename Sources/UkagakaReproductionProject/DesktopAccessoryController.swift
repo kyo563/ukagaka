@@ -82,7 +82,7 @@ final class DesktopAccessoryController: NSObject, NSWindowDelegate {
         state.$isBubbleVisible
             .dropFirst()
             .sink { [weak self] _ in
-                DispatchQueue.main.async { self?.updatePanelSize(animated: true) }
+                DispatchQueue.main.async { self?.updatePanelSize(animated: false) }
             }
             .store(in: &observers)
 

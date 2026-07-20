@@ -12,12 +12,21 @@ struct CharacterStageView: View {
     }
 
     var body: some View {
-        VStack(spacing: 6) {
-            if state.isBubbleVisible {
-                SpeechBubbleView(state: state)
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
-            }
+        let panelWidth = DesktopPanelMetrics.width(
+            characterAScale: settings.characterAScale,
+            characterBScale: settings.characterBScale
+        )
+        let panelHeight = DesktopPanelMetrics.height(
+            characterAScale: settings.characterAScale,
+            characterBScale: settings.characterBScale,
+            bubbleVisible: state.isBubbleVisible
+        )
+        let characterHeight = DesktopPanelMetrics.characterContentHeight(
+            characterAScale: settings.characterAScale,
+            characterBScale: settings.characterBScale
+        )
 
+        ZStack(alignment: .bottom) {
             HStack(alignment: .bottom, spacing: 8) {
                 if let mascotCharacter {
                     CharacterView(
@@ -39,28 +48,25 @@ struct CharacterStageView: View {
                     )
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            .frame(width: panelWidth - 24, height: characterHeight, alignment: .bottom)
+            .padding(.bottom, 6)
             .opacity(settings.characterOpacity)
             .contentShape(Rectangle())
             .onTapGesture {
                 state.showBubble()
             }
+
+            if state.isBubbleVisible {
+                SpeechBubbleView(state: state)
+                    .frame(width: panelWidth - 24)
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 6)
+                    .transition(.opacity)
+                    .zIndex(1)
+            }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .frame(
-            width: DesktopPanelMetrics.width(
-                characterAScale: settings.characterAScale,
-                characterBScale: settings.characterBScale
-            ),
-            height: DesktopPanelMetrics.height(
-                characterAScale: settings.characterAScale,
-                characterBScale: settings.characterBScale,
-                bubbleVisible: state.isBubbleVisible
-            )
-        )
+        .frame(width: panelWidth, height: panelHeight, alignment: .bottom)
         .background(Color.clear)
-        .animation(.easeInOut(duration: 0.2), value: state.isBubbleVisible)
         .contextMenu {
             Button(state.isBubbleVisible ? "吹き出しを閉じる" : "吹き出しを表示") {
                 state.isBubbleVisible ? state.hideBubble() : state.showBubble()

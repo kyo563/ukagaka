@@ -117,12 +117,17 @@ final class CompanionSettingsTests: XCTestCase {
     func testCompactPanelKeepsMascotAndMainCharacterWithinStableBounds() {
         XCTAssertEqual(DesktopPanelMetrics.width(characterAScale: 1, characterBScale: 1), 398)
         XCTAssertEqual(
+            DesktopPanelMetrics.characterContentHeight(characterAScale: 1, characterBScale: 1),
+            249
+        )
+        XCTAssertEqual(
             DesktopPanelMetrics.height(characterAScale: 1, characterBScale: 1, bubbleVisible: false),
             261
         )
-        XCTAssertGreaterThan(
-            DesktopPanelMetrics.height(characterAScale: 1, characterBScale: 1, bubbleVisible: true),
-            DesktopPanelMetrics.height(characterAScale: 1, characterBScale: 1, bubbleVisible: false)
+        XCTAssertEqual(
+            DesktopPanelMetrics.height(characterAScale: 1, characterBScale: 1, bubbleVisible: true)
+                - DesktopPanelMetrics.height(characterAScale: 1, characterBScale: 1, bubbleVisible: false),
+            130
         )
     }
 }
