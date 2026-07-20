@@ -47,6 +47,7 @@ enum CharacterImageLoader {
     private static func legacyImage(for character: CompanionCharacter, expression: CharacterExpression) -> NSImage? {
         let baseNames = [
             "\(character.assetNamePrefix)_\(expression.rawValue)",
+            "\(character.assetNamePrefix)_happy",
             character.assetNamePrefix
         ]
 
@@ -79,7 +80,15 @@ enum CharacterImageLoader {
                 }
             }
 
-            if let url = Bundle.module.url(
+            if let url = Bundle.main.url(
+                forResource: fileName,
+                withExtension: fileExtension,
+                subdirectory: subdirectory
+            ), let image = NSImage(contentsOf: url) {
+                return image
+            }
+
+            if let url = swiftPackageResourceBundle?.url(
                 forResource: fileName,
                 withExtension: fileExtension,
                 subdirectory: subdirectory
@@ -102,5 +111,16 @@ enum CharacterImageLoader {
             rootURL.appendingPathComponent(nestedPath, isDirectory: true),
             rootURL.appendingPathComponent("Characters").appendingPathComponent(nestedPath, isDirectory: true)
         ]
+    }
+
+    private static var swiftPackageResourceBundle: Bundle? {
+        guard let executableDirectory = Bundle.main.executableURL?.deletingLastPathComponent() else {
+            return nil
+        }
+        let bundleURL = executableDirectory.appendingPathComponent(
+            "UkagakaReproductionProject_UkagakaReproductionProject.bundle",
+            isDirectory: true
+        )
+        return Bundle(url: bundleURL)
     }
 }

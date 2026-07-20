@@ -4,6 +4,7 @@ import Foundation
 enum AppCommand {
     case search(String)
     case launchApplication(String)
+    case today
     case chat(String)
 }
 
@@ -11,6 +12,10 @@ struct CommandParser {
     func parse(_ input: String) -> AppCommand? {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
+
+        if ["今日は何の日", "今日何の日", "きょうは何の日"].contains(trimmed) {
+            return .today
+        }
 
         if let query = trimmed.removingCommandPrefix(["検索", "search", "s"]) {
             return .search(query)
@@ -49,11 +54,13 @@ extension String {
 
 enum CommandResult {
     case handled(String, CharacterExpression)
+    case showToday
     case passToConversation
 }
 
 enum CommandRouterError: Error {
     case invalidSearchURL
+    case applicationNotFound(String)
 }
 
 @MainActor
@@ -63,7 +70,9 @@ struct CommandRouter {
         case .search(let query):
             return try openSearch(query)
         case .launchApplication(let applicationName):
-            return launchApplication(applicationName)
+            return try launchApplication(applicationName)
+        case .today:
+            return .showToday
         case .chat:
             return .passToConversation
         }
@@ -82,20 +91,18 @@ struct CommandRouter {
         return .handled("「\(finalQuery)」を検索します。", .happy)
     }
 
-    private func launchApplication(_ applicationName: String) -> CommandResult {
+    private func launchApplication(_ applicationName: String) throws -> CommandResult {
         let finalName = applicationName.isEmpty ? "Safari" : applicationName
-        let appURL = URL(fileURLWithPath: "/Applications/\(finalName).app")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["-a", finalName]
+        try process.run()
+        process.waitUntilExit()
 
-        if FileManager.default.fileExists(atPath: appURL.path) {
-            NSWorkspace.shared.openApplication(
-                at: appURL,
-                configuration: NSWorkspace.OpenConfiguration(),
-                completionHandler: nil
-            )
-        } else {
-            NSWorkspace.shared.launchApplication(finalName)
+        guard process.terminationStatus == 0 else {
+            throw CommandRouterError.applicationNotFound(finalName)
         }
 
-        return .handled("「\(finalName)」を起動してみます。", .happy)
+        return .handled("「\(finalName)」を起動しました。", .happy)
     }
 }
