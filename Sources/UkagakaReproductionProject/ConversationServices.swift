@@ -62,7 +62,12 @@ struct OpenAIModelService {
         request.timeoutInterval = 45
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
+        request.httpBody = try JSONSerialization.data(withJSONObject: Self.connectionTestPayload(model: model))
+        _ = try await OpenAIRequestExecutor.perform(request, session: session)
+    }
+
+    static func connectionTestPayload(model: String) -> [String: Any] {
+        [
             "model": model,
             "store": false,
             "max_output_tokens": 64,
@@ -80,8 +85,7 @@ struct OpenAIModelService {
                     ]
                 ]
             ]
-        ])
-        _ = try await OpenAIRequestExecutor.perform(request, session: session)
+        ]
     }
 
     static func selectableModelIDs(from data: Data) throws -> [String] {
