@@ -34,8 +34,15 @@ enum DesktopPanelMetrics {
         max(360, (205 * characterAScale) + (145 * characterBScale) + 48)
     }
 
+    static func characterContentHeight(characterAScale: Double, characterBScale: Double) -> Double {
+        max(225 * characterAScale, 155 * characterBScale) + 24
+    }
+
     static func height(characterAScale: Double, characterBScale: Double, bubbleVisible: Bool) -> Double {
-        let characterHeight = max(225 * characterAScale, 155 * characterBScale) + 24
+        let characterHeight = characterContentHeight(
+            characterAScale: characterAScale,
+            characterBScale: characterBScale
+        )
         return characterHeight + (bubbleVisible ? 142 : 12)
     }
 }

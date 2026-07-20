@@ -26,7 +26,7 @@ jobs:
 
       - name: Build app bundle
         env:
-          VERSION: 0.2.0
+          VERSION: 0.2.1
           ARCHS: universal
         run: |
           chmod +x Scripts/*.sh
