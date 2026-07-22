@@ -18,8 +18,9 @@ final class PluginArchitectureTests: XCTestCase {
 
         try await registry.register(plugin)
         await registry.setEnabled(false, pluginID: plugin.manifest.id)
+        let sources = await registry.enabledEventSources()
 
-        XCTAssertTrue(await registry.enabledEventSources().isEmpty)
+        XCTAssertTrue(sources.isEmpty)
     }
 
     func testPipelineDiscardsDuplicateEvent() async {
@@ -41,15 +42,17 @@ final class PluginArchitectureTests: XCTestCase {
         )
         let pipeline = EventPipeline(policy: policy)
         let event = MockEventPlugin.makeEvent(priority: .critical)
+        let decision = await pipeline.evaluate(event)
 
-        XCTAssertEqual(await pipeline.evaluate(event), .deliverImmediately)
+        XCTAssertEqual(decision, .deliverImmediately)
     }
 
     func testNormalEventIsQueuedForDigest() async {
         let pipeline = EventPipeline()
         let event = MockEventPlugin.makeEvent(priority: .normal)
+        let decision = await pipeline.evaluate(event)
 
-        XCTAssertEqual(await pipeline.evaluate(event), .queueForDigest)
+        XCTAssertEqual(decision, .queueForDigest)
     }
 }
 
